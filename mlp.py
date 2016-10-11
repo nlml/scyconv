@@ -28,7 +28,7 @@ import os
 import sys
 import timeit
 
-import numpy as np
+import numpy
 
 import theano
 import theano.tensor as T
@@ -36,11 +36,16 @@ import theano.tensor as T
 
 from logistic_sgd import LogisticRegression, load_data
 
+from prelu import prelu, get_prelu_alpha
+from dropout import apply_dropout
 
 # start-snippet-1
+'''
+Liam: changes are just to deal with deterministic input and PReLU activation
+'''
 class HiddenLayer(object):
     def __init__(self, rng, input, n_in, n_out, W=None, b=None,
-                 activation=T.tanh):
+                 activation=T.tanh, dropout_p=0, input_deterministic=None):
         """
         Typical hidden layer of a MLP: units are fully-connected and have
         sigmoidal activation function. Weight matrix W is of shape (n_in,n_out)
@@ -50,7 +55,7 @@ class HiddenLayer(object):
 
         Hidden unit activation is given by: tanh(dot(input,W) + b)
 
-        :type rng: np.random.RandomState
+        :type rng: numpy.random.RandomState
         :param rng: a random number generator used to initialize weights
 
         :type input: theano.tensor.dmatrix
@@ -67,6 +72,8 @@ class HiddenLayer(object):
                            layer
         """
         self.input = input
+        self.input_deterministic = input_deterministic
+        self.activation = activation
         # end-snippet-1
 
         # `W` is initialized with `W_values` which is uniformely sampled
@@ -82,10 +89,10 @@ class HiddenLayer(object):
         #        We have no info for other function, so we use the same as
         #        tanh.
         if W is None:
-            W_values = np.asarray(
+            W_values = numpy.asarray(
                 rng.uniform(
-                    low=-np.sqrt(6. / (n_in + n_out)),
-                    high=np.sqrt(6. / (n_in + n_out)),
+                    low=-numpy.sqrt(6. / (n_in + n_out)),
+                    high=numpy.sqrt(6. / (n_in + n_out)),
                     size=(n_in, n_out)
                 ),
                 dtype=theano.config.floatX
@@ -96,20 +103,47 @@ class HiddenLayer(object):
             W = theano.shared(value=W_values, name='W', borrow=True)
 
         if b is None:
-            b_values = np.zeros((n_out,), dtype=theano.config.floatX)
+            b_values = numpy.zeros((n_out,), dtype=theano.config.floatX)
             b = theano.shared(value=b_values, name='b', borrow=True)
 
         self.W = W
         self.b = b
+        
+        self.out_shape = [n_out]
+        
+        '''
+        Liam: Changes are pretty much identical to those for conv layer...
+        '''
+        if activation == prelu:
+            self.alpha = get_prelu_alpha(self.out_shape)
+            self.params = [self.W, self.b, self.alpha]
+        else:
+            self.alpha = None
+            self.params = [self.W, self.b]
+    
+    
+        # Get the (deterministic) output
+        self.output = self.get_output(self.input)
+        
+        if self.input_deterministic is not None:
+            self.output_deterministic = \
+                self.get_output(self.input_deterministic)
+        else:
+            self.output_deterministic = self.output
+        
+        if dropout_p > 0:
+            self.output = apply_dropout(self.output, self.out_shape, 
+                                        dropout_p, rng)
 
-        lin_output = T.dot(input, self.W) + self.b
-        self.output = (
-            lin_output if activation is None
-            else activation(lin_output)
-        )
-        # parameters of the model
-        self.params = [self.W, self.b]
-
+    def get_output(self, inp):
+        lin_output = T.dot(inp, self.W) + self.b
+        if self.activation == prelu:
+            output = self.activation(lin_output, self.alpha)
+        elif self.activation is not None:
+            output = self.activation(lin_output)
+        else:
+            output = lin_output
+        return output
 
 # start-snippet-2
 class MLP(object):
@@ -126,7 +160,7 @@ class MLP(object):
     def __init__(self, rng, input, n_in, n_hidden, n_out):
         """Initialize the parameters for the multilayer perceptron
 
-        :type rng: np.random.RandomState
+        :type rng: numpy.random.RandomState
         :param rng: a random number generator used to initialize weights
 
         :type input: theano.tensor.TensorType
@@ -155,7 +189,8 @@ class MLP(object):
             input=input,
             n_in=n_in,
             n_out=n_hidden,
-            activation=T.tanh
+            activation=T.tanh,
+            dropout_p=0.5
         )
 
         # The logistic regression layer gets as input the hidden units
@@ -163,7 +198,8 @@ class MLP(object):
         self.logRegressionLayer = LogisticRegression(
             input=self.hiddenLayer.output,
             n_in=n_hidden,
-            n_out=n_out
+            n_out=n_out,
+            input_deterministic=self.hiddenLayer.output_deterministic
         )
         # end-snippet-2 start-snippet-3
         # L1 norm ; one regularization option is to enforce L1 norm to
@@ -227,7 +263,10 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
 
 
    """
-    datasets = load_data(dataset)
+
+    rng = numpy.random.RandomState(1234)
+    
+    datasets = load_data(dataset, 96 * 160. / 50000, rng)
 
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
@@ -248,8 +287,6 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
     x = T.matrix('x')  # the data is presented as rasterized images
     y = T.ivector('y')  # the labels are presented as 1D vector of
                         # [int] labels
-
-    rng = np.random.RandomState(1234)
 
     # construct the MLP class
     classifier = MLP(
@@ -275,7 +312,7 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
     # by the model on a minibatch
     test_model = theano.function(
         inputs=[index],
-        outputs=classifier.errors(y),
+        outputs=classifier.errors(y, deterministic=True),
         givens={
             x: test_set_x[index * batch_size:(index + 1) * batch_size],
             y: test_set_y[index * batch_size:(index + 1) * batch_size]
@@ -284,7 +321,7 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
 
     validate_model = theano.function(
         inputs=[index],
-        outputs=classifier.errors(y),
+        outputs=classifier.errors(y, deterministic=True),
         givens={
             x: valid_set_x[index * batch_size:(index + 1) * batch_size],
             y: valid_set_y[index * batch_size:(index + 1) * batch_size]
@@ -339,7 +376,7 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
                                   # on the validation set; in this case we
                                   # check every epoch
 
-    best_validation_loss = np.inf
+    best_validation_loss = numpy.inf
     best_iter = 0
     test_score = 0.
     start_time = timeit.default_timer()
@@ -359,7 +396,7 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
                 # compute zero-one loss on validation set
                 validation_losses = [validate_model(i) for i
                                      in range(n_valid_batches)]
-                this_validation_loss = np.mean(validation_losses)
+                this_validation_loss = numpy.mean(validation_losses)
 
                 print(
                     'epoch %i, minibatch %i/%i, validation error %f %%' %
@@ -386,7 +423,7 @@ def test_mlp(learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
                     # test it on the test set
                     test_losses = [test_model(i) for i
                                    in range(n_test_batches)]
-                    test_score = np.mean(test_losses)
+                    test_score = numpy.mean(test_losses)
 
                     print(('     epoch %i, minibatch %i/%i, test error of '
                            'best model %f %%') %
