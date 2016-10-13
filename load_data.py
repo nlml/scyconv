@@ -23,6 +23,9 @@ def load_data(dataset, p=1.0, rng=None):
     #############
     # LOAD DATA #
     #############
+    
+    if rng is None:
+        rng = np.random.RandomState(0)
 
     # Download the MNIST dataset if it is not present
     data_dir, data_file = os.path.split(dataset)

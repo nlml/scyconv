@@ -40,7 +40,7 @@ from mlp import HiddenLayer
 
 from prelu import prelu, get_prelu_alpha
 from dropout import apply_dropout
-from momentum import sgd, apply_nesterov_momentum
+from momentum import sgd, apply_nesterov_momentum, rmsprop
 
 class LeNetConvPoolLayer(object):
     """Pool Layer of a convolutional network """
@@ -183,7 +183,7 @@ class LeNetConvPoolLayer(object):
 def evaluate_lenet5(learning_rate=0.1, n_epochs=200,
                     dataset='mnist.pkl.gz',
                     nkerns=[20, 50], batch_size=96,
-                    momentum=0.9, activation=prelu,
+                    momentum='rmsprop', activation=prelu,
                     rng=None, dropout_p=0.0):
     """ Demonstrates lenet on MNIST dataset
 
@@ -321,11 +321,24 @@ def evaluate_lenet5(learning_rate=0.1, n_epochs=200,
     '''
     Liam: replaced the gradients and updates calcs to include momentum
     '''    
-    updates = sgd(cost, params, learning_rate)
-    updates = apply_nesterov_momentum(updates, momentum=momentum)
+    if momentum == 'rmsprop':
+        updates = rmsprop(cost, params)
+    else:
+        updates = sgd(cost, params, learning_rate)
+        updates = apply_nesterov_momentum(updates, momentum=momentum)
     '''
     Liam: Everything from here is unchanged
     '''
+
+    train_model = theano.function(
+        [index],
+        cost,
+        updates=updates,
+        givens={
+            x: train_set_x[index * batch_size: (index + 1) * batch_size],
+            y: train_set_y[index * batch_size: (index + 1) * batch_size]
+        }
+    )
     ###############
     # TRAIN MODEL #
     ###############
